@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- APIキーなどの機密情報を含むSharedPreferencesを自動バックアップから除外 -->
+    <exclude domain="sharedpref" path="app_prefs.xml" />
+</full-backup-content>

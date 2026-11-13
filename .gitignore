@@ -1,0 +1,23 @@
+*.iml
+.gradle
+/local.properties
+local.properties
+/.idea
+.DS_Store
+Thumbs.db
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# Kotlin
+.kotlin/
+
+# Android Keystore & Signing credentials
+*.jks
+*.keystore
+*.p12
+*.bks
+signing.properties
+keystore.properties
+
