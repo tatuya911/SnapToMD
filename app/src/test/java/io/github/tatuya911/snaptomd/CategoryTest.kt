@@ -1,4 +1,4 @@
-﻿package io.github.tatuya911.snaptomd
+package io.github.tatuya911.snaptomd
 
 import io.github.tatuya911.snaptomd.data.Category
 import io.github.tatuya911.snaptomd.worker.MarkdownWorker
@@ -18,32 +18,46 @@ class CategoryTest {
     )
 
     @Test
-    fun resolveCategory_exactMatch() {
-        assertEquals("映画", MarkdownWorker.resolveCategory("映画", categories).name)
+    fun buildDecisionCriteria_mapsNormalCategoriesAndOther() {
+        val criteria = MarkdownWorker.buildDecisionCriteria(categories)
+        assertEquals(listOf("cat_0", "cat_1", "other"), criteria.keys.toList())
+        assertEquals("家電", criteria["cat_0"]?.first?.name)
+        assertEquals("家電: 家電製品・ガジェット", criteria["cat_0"]?.second)
+        assertEquals("映画", criteria["cat_1"]?.first?.name)
+        assertEquals("映画", criteria["cat_1"]?.second)
+        assertEquals(Category.OTHER_NAME, criteria["other"]?.first?.name)
     }
 
     @Test
-    fun resolveCategory_trimsWhitespaceAndBrackets() {
-        assertEquals("家電", MarkdownWorker.resolveCategory("  「家電」\n", categories).name)
+    fun buildDecisionRequestJson_containsModelLowResImageAndChoiceCriteria() {
+        val criteria = MarkdownWorker.buildDecisionCriteria(categories)
+        val json = MarkdownWorker.buildDecisionRequestJson("BASE64_DATA", criteria)
+
+        assertEquals(MarkdownWorker.DECISION_MODEL, json.getString("model"))
+        val input = json.getJSONArray("input")
+        assertEquals(1, input.length())
+        val imageBlock = input.getJSONObject(0)
+        assertEquals("image", imageBlock.getString("type"))
+        assertEquals("BASE64_DATA", imageBlock.getString("data"))
+        assertEquals("image/jpeg", imageBlock.getString("mime_type"))
+        assertEquals("low", imageBlock.getString("resolution"))
+
+        val categoryQ = json.getJSONObject("questions").getJSONObject("category")
+        assertEquals("choice", categoryQ.getString("type"))
+        val criteriaJson = categoryQ.getJSONObject("criteria")
+        assertEquals("家電: 家電製品・ガジェット", criteriaJson.getString("cat_0"))
+        assertEquals("映画", criteriaJson.getString("cat_1"))
+        assertTrue(criteriaJson.has("other"))
     }
 
     @Test
-    fun resolveCategory_partialMatch() {
-        assertEquals("映画", MarkdownWorker.resolveCategory("カテゴリは映画です", categories).name)
-    }
-
-    @Test
-    fun resolveCategory_unknownOrBlank_fallsBackToOther() {
-        assertTrue(MarkdownWorker.resolveCategory("食べ物", categories).isOther)
-        assertTrue(MarkdownWorker.resolveCategory("", categories).isOther)
-    }
-
-    @Test
-    fun buildClassificationPrompt_includesNamesHintsAndOther() {
-        val prompt = MarkdownWorker.buildClassificationPrompt(categories)
-        assertTrue(prompt.contains("- 家電: 家電製品・ガジェット"))
-        assertTrue(prompt.contains("- 映画\n"))
-        assertTrue(prompt.endsWith("- その他"))
+    fun resolveDecisionCategory_resolvesKnownKeyAndFallsBackToOther() {
+        val criteria = MarkdownWorker.buildDecisionCriteria(categories)
+        assertEquals("家電", MarkdownWorker.resolveDecisionCategory("cat_0", criteria, categories).name)
+        assertEquals("映画", MarkdownWorker.resolveDecisionCategory(" cat_1 ", criteria, categories).name)
+        assertTrue(MarkdownWorker.resolveDecisionCategory("other", criteria, categories).isOther)
+        assertTrue(MarkdownWorker.resolveDecisionCategory("unknown_key", criteria, categories).isOther)
+        assertTrue(MarkdownWorker.resolveDecisionCategory("", criteria, categories).isOther)
     }
 
     @Test

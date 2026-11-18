@@ -62,32 +62,77 @@ class MarkdownWorker(
             return "$FIXED_INSTRUCTION\n$body"
         }
 
-        /** カテゴリ判定用のプロンプトを組み立てる（「その他」は常に末尾） */
-        fun buildClassificationPrompt(categories: List<Category>): String {
-            val lines = categories.filter { !it.isOther }.joinToString("\n") {
-                if (it.hint.isBlank()) "- ${it.name}" else "- ${it.name}: ${it.hint.trim()}"
-            }
-            return "この画像が次のどのカテゴリに最も当てはまるか判定し、カテゴリ名のみを出力してください。\n" +
-                "どれにも当てはまらない場合は「${Category.OTHER_NAME}」と出力してください。\n" +
-                (if (lines.isEmpty()) "" else "$lines\n") +
-                "- ${Category.OTHER_NAME}"
-        }
+        const val DECISION_MODEL = "gemini-decision-1"
+        const val DECISION_QUESTION_ID = "category"
+        const val DECISION_IMAGE_RESOLUTION = "low"
+        const val DECISION_OTHER_KEY = "other"
 
-        /** 判定結果の文字列からカテゴリを解決する。解決できなければ「その他」 */
-        fun resolveCategory(response: String, categories: List<Category>): Category {
+        /**
+         * Decisions API の choice 選択肢マップ（optionKey -> Pair(Category, description)）を構築する。
+         * キーは安全なASCII文字列（通常カテゴリ: cat_0, cat_1, ... / その他: other）を使用する。
+         */
+        fun buildDecisionCriteria(categories: List<Category>): LinkedHashMap<String, Pair<Category, String>> {
+            val result = LinkedHashMap<String, Pair<Category, String>>()
+            var index = 0
+            categories.filter { !it.isOther }.forEach { category ->
+                val desc = if (category.hint.isBlank()) {
+                    category.name
+                } else {
+                    "${category.name}: ${category.hint.trim()}"
+                }
+                result["cat_$index"] = category to desc
+                index++
+            }
             val other = categories.firstOrNull { it.isOther }
                 ?: Category(Category.OTHER_NAME, ApiKeyManager.DEFAULT_TEMPLATE)
-            val text = response.trim()
-            if (text.isEmpty()) return other
-            categories.firstOrNull { it.name == text }?.let { return it }
-            // 前後の記号（「」・句読点など）を除去して再比較
-            val stripped = text.trim { !it.isLetterOrDigit() }
-            categories.firstOrNull { it.name == stripped }?.let { return it }
-            // 部分一致（長い名前を優先）
-            return categories.filter { !it.isOther }
-                .sortedByDescending { it.name.length }
-                .firstOrNull { text.contains(it.name) }
-                ?: other
+            val otherDesc = if (other.hint.isBlank()) {
+                "その他のカテゴリ（上記のいずれにも当てはまらないもの）"
+            } else {
+                "${other.name}: ${other.hint.trim()}"
+            }
+            result[DECISION_OTHER_KEY] = other to otherDesc
+            return result
+        }
+
+        /** Decisions API (`gemini-decision-1`) へのリクエストJSONを組み立てる */
+        fun buildDecisionRequestJson(
+            base64Image: String,
+            criteriaMap: Map<String, Pair<Category, String>>
+        ): JSONObject {
+            val imageBlock = JSONObject().apply {
+                put("type", "image")
+                put("data", base64Image)
+                put("mime_type", "image/jpeg")
+                put("resolution", DECISION_IMAGE_RESOLUTION)
+            }
+            val criteriaJson = JSONObject()
+            criteriaMap.forEach { (key, pair) ->
+                criteriaJson.put(key, pair.second)
+            }
+            val questionObj = JSONObject().apply {
+                put("type", "choice")
+                put("instructions", "この画像が次のどのカテゴリに最も当てはまるか判定してください。")
+                put("criteria", criteriaJson)
+            }
+            val questionsObj = JSONObject().apply {
+                put(DECISION_QUESTION_ID, questionObj)
+            }
+            return JSONObject().apply {
+                put("model", DECISION_MODEL)
+                put("input", JSONArray().put(imageBlock))
+                put("questions", questionsObj)
+            }
+        }
+
+        /** Decisions API が返した optionKey からカテゴリを解決する。解決できなければ「その他」 */
+        fun resolveDecisionCategory(
+            choiceKey: String,
+            criteriaMap: Map<String, Pair<Category, String>>,
+            categories: List<Category>
+        ): Category {
+            val other = categories.firstOrNull { it.isOther }
+                ?: Category(Category.OTHER_NAME, ApiKeyManager.DEFAULT_TEMPLATE)
+            return criteriaMap[choiceKey.trim()]?.first ?: other
         }
     }
 
@@ -130,13 +175,13 @@ class MarkdownWorker(
         var isNoteSaved = false
 
         return try {
-            // カテゴリ判定（カテゴリが「その他」のみ、またはモックモードでは省略）
+            // カテゴリ判定（カテゴリが「その他」のみ、画像なし、またはモックモードでは省略）
             val categories = apiKeyManager.getCategories()
-            val category = if (apiKeyManager.isMockMode() || categories.size < 2) {
+            val category = if (apiKeyManager.isMockMode() || categories.size < 2 || imageUriString.isNullOrBlank()) {
                 categories.first { it.isOther }
             } else {
                 showProgressNotification("画像を分類中…")
-                classifyCategory(apiKeyManager, categories, imageUriString)
+                classifyCategory(apiKey, categories, imageUriString)
             }
             showProgressNotification("AI解析・Web検索中…")
 
@@ -217,26 +262,70 @@ class MarkdownWorker(
     }
 
     /**
-     * 画像のカテゴリを判定する。通信・解析に失敗した場合は「その他」にフォールバックする
+     * Gemini Decisions API (gemini-decision-1) を使って画像のカテゴリを判定する。
+     * 通信・解析に失敗した場合は「その他」にフォールバックする
      */
     private suspend fun classifyCategory(
-        apiKeyManager: ApiKeyManager,
+        apiKey: String,
         categories: List<Category>,
-        imageUriString: String?
+        imageUriString: String
     ): Category {
         return try {
-            val response = callGemini(
-                apiKey = apiKeyManager.getApiKey(),
-                modelName = apiKeyManager.getModelName(),
-                prompt = buildClassificationPrompt(categories),
+            val criteriaMap = buildDecisionCriteria(categories)
+            val choiceKey = callGeminiDecisions(
+                apiKey = apiKey,
                 imageUriString = imageUriString,
-                useSearch = false,
-                temperature = 0.0,
+                criteriaMap = criteriaMap,
                 maxImageSize = 512
             )
-            resolveCategory(response, categories)
+            resolveDecisionCategory(choiceKey, criteriaMap, categories)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             categories.first { it.isOther }
+        }
+    }
+
+    /**
+     * Gemini Decisions API (POST /v1beta/decisions) を呼び出して choice 結果キーを返す
+     */
+    private suspend fun callGeminiDecisions(
+        apiKey: String,
+        imageUriString: String,
+        criteriaMap: Map<String, Pair<Category, String>>,
+        maxImageSize: Int
+    ): String = withContext(Dispatchers.IO) {
+        val endpointUrl = "https://generativelanguage.googleapis.com/v1beta/decisions"
+
+        val bitmap = decodeSampledBitmapFromUri(Uri.parse(imageUriString), maxImageSize, maxImageSize)
+            ?: throw IllegalStateException("画像を読み込めませんでした。もう一度共有してください。")
+        val outputStream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+        val base64Data = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
+
+        val requestJson = buildDecisionRequestJson(base64Data, criteriaMap)
+
+        val connection = (URL(endpointUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("x-goog-api-key", apiKey)
+            doOutput = true
+            connectTimeout = 30000
+            readTimeout = 30000
+        }
+
+        connection.outputStream.use { os ->
+            os.write(requestJson.toString().toByteArray(Charsets.UTF_8))
+            os.flush()
+        }
+
+        val responseCode = connection.responseCode
+        if (responseCode == 200) {
+            val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+            return@withContext GeminiResponseParser.parseDecisionChoice(responseText, DECISION_QUESTION_ID)
+        } else {
+            val errorResponse = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            throw GeminiResponseParser.parseError(responseCode, errorResponse)
         }
     }
 

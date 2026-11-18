@@ -1,4 +1,4 @@
-﻿package io.github.tatuya911.snaptomd
+package io.github.tatuya911.snaptomd
 
 import io.github.tatuya911.snaptomd.worker.GeminiResponseParser
 import org.junit.Assert.assertEquals
@@ -52,5 +52,48 @@ class GeminiResponseParserTest {
     fun parseError_nonJson_usesRawBody() {
         val e = GeminiResponseParser.parseError(500, "oops")
         assertEquals("oops", e.message)
+    }
+
+    @Test
+    fun parseDecisionChoice_extractsChoice() {
+        val json = """{
+            "answers": {
+                "category": {
+                    "type": "choice",
+                    "choice": "cat_0",
+                    "confidence": 0.95,
+                    "probabilities": {"cat_0": 0.95, "other": 0.05}
+                }
+            },
+            "usage": {"total_input_tokens": 280, "total_output_tokens": 0}
+        }"""
+        assertEquals("cat_0", GeminiResponseParser.parseDecisionChoice(json))
+    }
+
+    @Test
+    fun parseDecisionChoice_missingAnswers_throws() {
+        try {
+            GeminiResponseParser.parseDecisionChoice("""{}""")
+            fail("例外が発生するはず")
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    @Test
+    fun parseDecisionChoice_missingQuestion_throws() {
+        try {
+            GeminiResponseParser.parseDecisionChoice("""{"answers":{}}""")
+            fail("例外が発生するはず")
+        } catch (_: IllegalStateException) {
+        }
+    }
+
+    @Test
+    fun parseDecisionChoice_emptyChoice_throws() {
+        try {
+            GeminiResponseParser.parseDecisionChoice("""{"answers":{"category":{"type":"choice","choice":""}}}""")
+            fail("例外が発生するはず")
+        } catch (_: IllegalStateException) {
+        }
     }
 }

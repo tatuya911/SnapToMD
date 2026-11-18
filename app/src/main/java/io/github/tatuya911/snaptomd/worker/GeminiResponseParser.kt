@@ -1,4 +1,4 @@
-﻿package io.github.tatuya911.snaptomd.worker
+package io.github.tatuya911.snaptomd.worker
 
 import org.json.JSONObject
 
@@ -53,6 +53,23 @@ object GeminiResponseParser {
             )
         }
         return text
+    }
+
+    /**
+     * Decisions API のレスポンスJSONから、指定した質問IDの choice 結果キーを抽出する。
+     * 結果が取得できない場合は IllegalStateException を投げる。
+     */
+    fun parseDecisionChoice(responseText: String, questionId: String = "category"): String {
+        val json = JSONObject(responseText)
+        val answers = json.optJSONObject("answers")
+            ?: throw IllegalStateException("Decisions APIからの応答に answers が含まれていません。")
+        val answer = answers.optJSONObject(questionId)
+            ?: throw IllegalStateException("Decisions APIからの応答に質問 '$questionId' の結果が含まれていません。")
+        val choice = answer.optString("choice", "").trim()
+        if (choice.isEmpty()) {
+            throw IllegalStateException("Decisions APIからの応答で choice が空でした。")
+        }
+        return choice
     }
 
     /**
